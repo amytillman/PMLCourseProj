@@ -1,0 +1,153 @@
+---
+output: html_document
+---
+## Practical Machine Learning Course Project
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Background
+It is now possible to collect a large amount of data about personal activity using devices. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, we use data ([http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har)) from accelerometers on the belt, forearm, arm, and dumbell of six participants. Participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other four classes correspond to common mistakes. Participants were supervised by an experienced weight lifter to make sure the execution complied to the manner they were supposed to simulate. All participants could easily simulate the mistakes in a safe and controlled manner by using a relatively light dumbbell (1.25kg).  
+
+The goal of the project is to predict the class type, "classe" variable in the training set.  
+
+### Data 
+The training data for this project are available here: [https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)  
+The test data are available here: [https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)  
+
+```{r, include=FALSE, results='hide', message=FALSE}
+library(tidyverse); library(dplyr)
+library(caret); library(rattle)
+library(randomForest); library(gbm)
+```
+
+### Exploring+Cleaning data
+The training dataset has 19,622 observations and 160 variables and the training set has 20 observations and 160 variables. I compared the variables - classe is in the training data only and problem_id (same as row numberor "X") is in the test data only. After exploring, I decided to remove the 406 new_window="yes" observations from the training dataset because these observations appear to be derived and ARE NOT in the test data. I dropped 100 variables where all data were missing/NA. In addition to these 100 variables, I also dropped "X", "raw_timestamp_part*", "cvtd_timestamp", "new_window", and "num_window" because they don't include necessary information. I dropped the same variables in the test data and removed "problem_id" as well.  
+
+### Method and Results
+In order to obtain the out-of-sample error, I split the training data into two datasets - one for training (used for model fit) and one for validation (used to obtain the out-of-sample error). I compared three different methods: classification/decision trees (method=rpart), random forest (method=rf), and boosting with trees (method=gbm). For all three prediction models, I assumed tuneLength=5 and trainControl with resampling method="cv" and 3 folds or resampling iterations. The best model fit with respect to accuracy and low out-of-sample error was random forest - 99.58% accuracy and 0.42% error.  
+
+```{r}
+#Download data if it does not already exist in working directory
+if(!file.exists("pml-training.csv")){
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+                destfile = "pml-training.csv")
+}
+if(!file.exists("pml-testing.csv")){
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+                destfile = "pml-testing.csv")
+}
+
+#read in data
+pml_train <- read.csv("pml-training.csv", header=TRUE, na.strings=c("NA","","#DIV/0!"))
+pml_test <- read.csv("pml-testing.csv", header=TRUE, na.strings=c("NA","","#DIV/0!"))
+
+#explore variable names and # of variables 
+#variable X is just row number
+#6 participants
+#table(pml_train$user_name)
+#table(pml_test$user_name)
+#remove new_window=yes observations from the training set - appear to be derived and ARE NOT in the test data
+table(pml_train$new_window)
+table(pml_test$new_window)
+
+#compare variable names between training and test data
+identical(names(pml_train),names(pml_test))
+names(pml_train)[names(pml_train)!=names(pml_test)] 
+#train dataset's 160th variable is classe
+names(pml_test)[names(pml_train)!=names(pml_test)]
+#test dataset's 160th variable is problem_id which is the same as row number (X variable)
+
+#retain observations from training data where new_window=no
+pml_train0 <- pml_train %>% filter(new_window=="no")
+
+#investigate variables with missing data
+miss_train <- pml_train0 %>% 
+  summarise_all(list(~sum(is.na(.))/length(.))) %>%
+  pivot_longer(everything()) 
+
+#100 vars with 100% NA/missing values
+table(miss_train$value) 
+
+#remove variables from training data where all values are NA/missing
+#also remove irrelevant variables (X, date/timestamp vars, and new_window vars)
+pml_train01 <- pml_train0 %>% 
+  select(!miss_train$name[miss_train$value==1]) %>%
+  select(-c(1,3:7))
+
+#investigate zero covariates using nearZeroVar in caret package
+nsv_train <- nearZeroVar(pml_train01,saveMetrics=TRUE)
+table(nsv_train$nzv) 
+#no additional variables to consider removing 
+
+#drop the same variables from the test dataset and also drop problem_id
+pml_test0 <- pml_test %>% 
+  select(!miss_train$name[miss_train$value==1]) %>%
+  select(-c(1,3:7)) %>%
+  select(-problem_id)
+```
+
+
+
+
+```{r, cache=TRUE}
+#In Sample Error: The error rate you get on the same dataset you used to build your predictor. 
+#Out of Sample Error: The error rate you get on a new dataset (not used to build training predictor).
+set.seed(72)
+#split the training dataset into two: one training and one validation so
+#you can get a sense of the out-of-sample error
+inTrain <- createDataPartition(y=pml_train01$classe, p=0.75, list=FALSE)
+pml_train_t <- pml_train01[inTrain,] #used for training
+pml_train_v <- pml_train01[-inTrain,] #used for validation
+
+#train_cor <- round(cor(pml_train_t[,-c(1,54)]),2)
+#table(pml_train_t$classe)
+
+#forum suggests that using this option will make some of the models run faster
+fitControl <- trainControl(method="cv", number=3)
+
+#rpart - predicting with trees
+modFit_rpart <- train(classe~., method="rpart", data=pml_train_t, trControl=fitControl, tuneLength=5)
+print(modFit_rpart$finalModel)
+#fancy plot
+fancyRpartPlot(modFit_rpart$finalModel)
+#predicting new values
+pred_rpart <- predict(modFit_rpart, newdata=pml_train_v)
+cm_rpart <- confusionMatrix(pred_rpart, as.factor(pml_train_v$classe))
+cm_rpart
+
+#random forest
+modFit_rf <- train(classe~., data=pml_train_t, method="rf", trControl=fitControl, tuneLength=5)
+modFit_rf
+pred_rf <- predict(modFit_rf, newdata=pml_train_v)
+cm_rf <- confusionMatrix(pred_rf, as.factor(pml_train_v$classe))
+cm_rf
+
+#boosting with trees
+modFit_gbm <- train(classe~., method="gbm", data=pml_train_t, 
+                    trControl=fitControl, tuneLength=5, verbose=FALSE)
+print(modFit_gbm)
+pred_gbm <- predict(modFit_gbm, newdata=pml_train_v)
+cm_gbm <- confusionMatrix(pred_gbm, as.factor(pml_train_v$classe))
+cm_gbm
+
+#accuracy of these 3 methods and the out-of-sample error 
+accmat <- matrix(
+  round(c(cm_rpart$overall[1],1-cm_rpart$overall[1],
+         cm_rf$overall[1],1-cm_rf$overall[1],
+         cm_gbm$overall[1],1-cm_gbm$overall[1]),4),
+         nrow=3, ncol=2, byrow=TRUE)
+rownames(accmat) <- c("rpart","rf","gbm")
+colnames(accmat) <- c("accuracy","error")
+accmat
+
+#best method is RF
+#predicting new values for test data using RF model fit
+(pred_rf_test <- predict(modFit_rf, newdata=pml_test0))
+```
+
+
+ 
+
+
